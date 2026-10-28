@@ -1,3 +1,4 @@
+import asyncio
 import enum
 import functools
 import gc
@@ -9,7 +10,7 @@ import threading
 import time
 import uuid
 from collections import Counter, defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from random import randrange
@@ -38,7 +39,7 @@ from langchain_core.runnables import (
 from langchain_core.runnables.graph import Edge
 from langchain_core.tools import tool
 from langchain_core.version import VERSION as LANGCHAIN_CORE_VERSION
-from langgraph.cache.base import BaseCache
+from langgraph.cache.base import BaseCache, FullKey
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
     Checkpoint,
@@ -2919,6 +2920,54 @@ def test_in_one_fan_out_state_graph_waiting_edge_multiple(
             "docs": ["doc1", "doc1", "doc2", "doc2", "doc3", "doc3", "doc4", "doc4"],
         }
         assert rewrite_query_count == 4
+
+
+def test_clear_cache_with_empty_sequence_is_noop() -> None:
+    class State(TypedDict):
+        value: str
+
+    class RecordingCache(BaseCache[Any]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleared: list[list[tuple[str, ...]] | None] = []
+
+        def get(self, keys: Sequence[FullKey]) -> dict[FullKey, Any]:
+            return {}
+
+        async def aget(self, keys: Sequence[FullKey]) -> dict[FullKey, Any]:
+            return {}
+
+        def set(self, pairs: Mapping[FullKey, tuple[Any, int | None]]) -> None:
+            pass
+
+        async def aset(self, pairs: Mapping[FullKey, tuple[Any, int | None]]) -> None:
+            pass
+
+        def clear(self, namespaces: Sequence[tuple[str, ...]] | None = None) -> None:
+            self.cleared.append(None if namespaces is None else list(namespaces))
+
+        async def aclear(
+            self, namespaces: Sequence[tuple[str, ...]] | None = None
+        ) -> None:
+            self.cleared.append(None if namespaces is None else list(namespaces))
+
+    cache = RecordingCache()
+    builder = StateGraph(State)
+    builder.add_node("a", lambda state: state)
+    builder.add_edge(START, "a")
+    builder.add_edge("a", END)
+    app = builder.compile(cache=cache)
+
+    # An explicit empty sequence selects no nodes, so nothing is cleared.
+    app.clear_cache([])
+    asyncio.run(app.aclear_cache([]))
+    assert cache.cleared == [[], []]
+
+    # No argument and None still clear every node.
+    app.clear_cache()
+    asyncio.run(app.aclear_cache(None))
+    assert {ns[-1] for ns in cache.cleared[-2]} == {"__start__", "a"}
+    assert {ns[-1] for ns in cache.cleared[-1]} == {"__start__", "a"}
 
 
 def test_callable_in_conditional_edges_with_no_path_map() -> None:
